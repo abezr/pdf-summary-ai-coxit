@@ -1,0 +1,50 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'pdf-summary-ai'
+    environment: 'production'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  - 'alerts.yml'
+
+scrape_configs:
+  # Backend API metrics
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['backend:4000']
+        labels:
+          service: 'api'
+    metrics_path: '/metrics'
+
+  # Worker metrics
+  - job_name: 'workers'
+    static_configs:
+      - targets: ['worker:4000']
+        labels:
+          service: 'worker'
+    metrics_path: '/metrics'
+
+  # PostgreSQL exporter
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+        labels:
+          service: 'database'
+
+  # Redis exporter
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+        labels:
+          service: 'cache'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

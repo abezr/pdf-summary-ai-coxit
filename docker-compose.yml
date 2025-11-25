@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  # Frontend (React SPA served by Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      - REACT_APP_API_URL=http://backend:4000
+      - REACT_APP_WS_URL=ws://backend:4000
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Backend API Gateway
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://pdfuser:pdfpassword@postgres:5432/pdfdb
+      - REDIS_URL=redis://redis:6379
+      - NODE_ENV=production
+    volumes:
+      - ./backend/logs:/app/logs
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Processing Worker Pool (3 instances)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    environment:
+      - WORKER_MODE=true
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://pdfuser:pdfpassword@postgres:5432/pdfdb
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 2G
+          cpus: '1'
+    networks:
+      - app-network
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=pdfuser
+      - POSTGRES_PASSWORD=pdfpassword
+      - POSTGRES_DB=pdfdb
+      - POSTGRES_INITDB_ARGS=-E UTF8 --locale=en_US.UTF-8
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdfuser -d pdfdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (Queue & Cache)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus (Metrics Collection)
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - app-network
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  # Grafana (Visualization)
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=redis-datasource,grafana-clock-panel
+      - GF_SERVER_ROOT_URL=http://localhost:3001
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Jaeger (Distributed Tracing)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686" # UI
+      - "14268:14268" # Collector HTTP
+      - "14250:14250" # Collector gRPC
+      - "6831:6831/udp" # Compact thrift
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+    volumes:
+      - jaeger_data:/badger
+    networks:
+      - app-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  jaeger_data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge
